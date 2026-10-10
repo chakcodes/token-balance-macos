@@ -9,7 +9,7 @@ mkdir -p "$module_cache" "$test_dir"
 CLANG_MODULE_CACHE_PATH="$module_cache" clang \
   -fobjc-arc \
   -Wall -Wextra \
-  -framework Foundation \
+  -framework Cocoa \
   -I "$project_dir/Sources/TokenBarCore" \
   "$project_dir/Tests/TokenBarCoreTests.m" \
   "$project_dir/Sources/TokenBarCore/TokenBarCore.m" \

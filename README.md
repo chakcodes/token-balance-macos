@@ -18,7 +18,7 @@
 
 ## Features
 
-- Displays your remaining Weekly allowance and the countdown to its natural reset.
+- Displays your remaining Weekly allowance and the expiry countdown for the nearest available Reset.
 - Shows the number of additional Resets available and warns you before they expire.
 - Refreshes automatically every 60 seconds, with an option to refresh immediately.
 - Uses a native hierarchical macOS menu and follows the system menu bar text color.
@@ -36,9 +36,9 @@ The normal menu bar format is:
 | --- | --- |
 | `65%` | Remaining Weekly allowance |
 | `R×2` | Two additional Resets are currently available |
-| `6d` | Six days until the natural Weekly reset |
+| `6d` | Six days until the nearest available Reset expires |
 
-When an additional Reset is close to expiring, the final field temporarily changes to its nearest expiry countdown. If the upstream source does not provide an exact number of Weekly uses, the app displays `W—` rather than fabricating a count from the percentage.
+The three fields always mean “remaining Weekly allowance · available Reset count · nearest Reset expiry.” Expiry durations over 24 hours are shown in days; durations of 24 hours or less are shown in hours. If no available Reset includes expiry details, the final field displays `—`.
 
 ## System Requirements
 

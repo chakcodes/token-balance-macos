@@ -1,4 +1,5 @@
 #import "TokenBarCore.h"
+#import <AppKit/AppKit.h>
 
 @interface TBWatcherPolicy ()
 @property (nonatomic, getter=isSuppressedUntilNextChatGPTLaunch) BOOL suppressedUntilNextChatGPTLaunch;
@@ -74,7 +75,7 @@
 @implementation TBMenuBarFormatter
 + (NSString *)shortDurationFrom:(NSDate *)now to:(NSDate *)future {
     NSTimeInterval seconds = MAX(0, [future timeIntervalSinceDate:now]);
-    if (seconds >= 86400) return [NSString stringWithFormat:@"%ldd", (long)ceil(seconds / 86400.0)];
+    if (seconds > 86400) return [NSString stringWithFormat:@"%ldd", (long)ceil(seconds / 86400.0)];
     if (seconds >= 3600) return [NSString stringWithFormat:@"%ldh", (long)ceil(seconds / 3600.0)];
     return [NSString stringWithFormat:@"%ldm", (long)MAX(1, ceil(seconds / 60.0))];
 }
@@ -83,21 +84,19 @@
                                  now:(NSDate *)now
                       alertThreshold:(NSTimeInterval)alertThreshold {
     NSString *percent = snapshot.percentRemaining ? [NSString stringWithFormat:@"%@%%", snapshot.percentRemaining] : @"—%";
-    NSString *uses = snapshot.usesRemaining ? [NSString stringWithFormat:@"W%@", snapshot.usesRemaining] : [NSString stringWithFormat:@"R×%ld", (long)snapshot.extraResetCount];
-    NSArray<TBExtraReset *> *expiring = [snapshot.extraResets filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(TBExtraReset *reset, NSDictionary *_) {
-        NSTimeInterval remaining = [reset.expiresAt timeIntervalSinceDate:now];
-        return remaining >= 0 && remaining <= alertThreshold;
+    NSString *uses = [NSString stringWithFormat:@"R×%ld", (long)snapshot.extraResetCount];
+    NSArray<TBExtraReset *> *available = [snapshot.extraResets filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(TBExtraReset *reset, NSDictionary *_) {
+        return [reset.expiresAt timeIntervalSinceDate:now] >= 0;
     }]];
     TBMenuBarLabelKind kind = TBMenuBarLabelKindNormal;
-    NSString *tail = snapshot.resetsAt ? [self shortDurationFrom:now to:snapshot.resetsAt] : @"—";
-    if (expiring.count > 0) {
-        TBExtraReset *soonest = [expiring sortedArrayUsingComparator:^NSComparisonResult(TBExtraReset *a, TBExtraReset *b) {
+    NSString *tail = @"—";
+    if (available.count > 0) {
+        TBExtraReset *soonest = [available sortedArrayUsingComparator:^NSComparisonResult(TBExtraReset *a, TBExtraReset *b) {
             return [a.expiresAt compare:b.expiresAt];
         }].firstObject;
-        tail = snapshot.usesRemaining
-            ? [NSString stringWithFormat:@"R×%lu %@", (unsigned long)expiring.count, [self shortDurationFrom:now to:soonest.expiresAt]]
-            : [self shortDurationFrom:now to:soonest.expiresAt];
-        kind = TBMenuBarLabelKindWarning;
+        NSTimeInterval remaining = [soonest.expiresAt timeIntervalSinceDate:now];
+        tail = [self shortDurationFrom:now to:soonest.expiresAt];
+        if (remaining <= alertThreshold) kind = TBMenuBarLabelKindWarning;
     }
     BOOL stale = [now timeIntervalSinceDate:snapshot.capturedAt] > 7200;
     NSString *text = [NSString stringWithFormat:@"%@ · %@ · %@%@", percent, uses, tail, stale ? @" ↻" : @""];
@@ -198,19 +197,71 @@ static NSDate *TBDateFromValue(id value) {
 }
 @end
 
+@interface TBCodexAppServerHandshake : NSObject
+@property (nonatomic) BOOL initialized;
+- (NSArray<NSDictionary *> *)startMessages;
+- (NSArray<NSDictionary *> *)messagesForResponse:(NSDictionary *)response error:(NSError **)error;
+@end
+
+@implementation TBCodexAppServerHandshake
+- (NSArray<NSDictionary *> *)startMessages {
+    return @[@{@"id": @1,
+               @"method": @"initialize",
+               @"params": @{@"clientInfo": @{@"name": @"tokenbar", @"title": @"Token Balance", @"version": @"1.0.2"},
+                            @"capabilities": @{@"experimentalApi": @YES}}}];
+}
+
+- (NSArray<NSDictionary *> *)messagesForResponse:(NSDictionary *)response error:(NSError **)error {
+    if ([response[@"id"] integerValue] != 1 || self.initialized) return @[];
+    NSDictionary *responseError = [response[@"error"] isKindOfClass:NSDictionary.class] ? response[@"error"] : nil;
+    if (responseError) {
+        NSString *message = [responseError[@"message"] isKindOfClass:NSString.class] ? responseError[@"message"] : @"ChatGPT app-server 初始化失败。";
+        if (error) *error = [NSError errorWithDomain:@"TokenBar.AppServer" code:12 userInfo:@{NSLocalizedDescriptionKey: message}];
+        return @[];
+    }
+    if (![response[@"result"] isKindOfClass:NSDictionary.class]) {
+        if (error) *error = [NSError errorWithDomain:@"TokenBar.AppServer" code:12 userInfo:@{NSLocalizedDescriptionKey: @"ChatGPT app-server 初始化响应无效。"}];
+        return @[];
+    }
+    self.initialized = YES;
+    return @[
+        @{@"method": @"initialized", @"params": @{}},
+        @{@"id": @2, @"method": @"account/rateLimits/read", @"params": NSNull.null}
+    ];
+}
+@end
+
 @implementation TBCodexAppServerProvider
 - (instancetype)init {
     if ((self = [super init])) _providerID = @"chatgpt";
     return self;
 }
 
++ (NSArray<NSString *> *)candidateExecutablePaths {
+    NSMutableArray<NSString *> *resourceRoots = [NSMutableArray array];
+    NSURL *installedApp = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:@"com.openai.codex"];
+    if (installedApp.path.length > 0) {
+        [resourceRoots addObject:[installedApp.path stringByAppendingPathComponent:@"Contents/Resources"]];
+    }
+    for (NSString *root in @[@"/Applications/ChatGPT.app/Contents/Resources",
+                             [NSHomeDirectory() stringByAppendingPathComponent:@"Applications/ChatGPT.app/Contents/Resources"]]) {
+        if (![resourceRoots containsObject:root]) [resourceRoots addObject:root];
+    }
+
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    for (NSString *root in resourceRoots) {
+        [paths addObject:[root stringByAppendingPathComponent:@"codex-cli/CodexCLI.app/Contents/MacOS/codex"]];
+        [paths addObject:[root stringByAppendingPathComponent:@"codex-cli/bin/codex"]];
+        [paths addObject:[root stringByAppendingPathComponent:@"codex"]];
+    }
+    [paths addObjectsFromArray:@[@"/opt/homebrew/bin/codex", @"/usr/local/bin/codex"]];
+    return paths;
+}
+
 - (NSURL *)codexExecutableURL {
-    NSArray<NSString *> *paths = @[
-        @"/Applications/ChatGPT.app/Contents/Resources/codex",
-        @"/opt/homebrew/bin/codex",
-        @"/usr/local/bin/codex"
-    ];
-    for (NSString *path in paths) if ([NSFileManager.defaultManager isExecutableFileAtPath:path]) return [NSURL fileURLWithPath:path];
+    for (NSString *path in self.class.candidateExecutablePaths) {
+        if ([NSFileManager.defaultManager isExecutableFileAtPath:path]) return [NSURL fileURLWithPath:path];
+    }
     return nil;
 }
 
@@ -228,8 +279,9 @@ static NSDate *TBDateFromValue(id value) {
     NSPipe *output = [NSPipe pipe];
     task.standardInput = input;
     task.standardOutput = output;
-    task.standardError = [NSPipe pipe];
+    task.standardError = NSFileHandle.fileHandleWithNullDevice;
     NSMutableData *buffer = [NSMutableData data];
+    TBCodexAppServerHandshake *handshake = [TBCodexAppServerHandshake new];
     __block BOOL finished = NO;
     void (^finish)(TBUsageSnapshot *, NSError *) = ^(TBUsageSnapshot *snapshot, NSError *error) {
         @synchronized (task) {
@@ -240,9 +292,23 @@ static NSDate *TBDateFromValue(id value) {
         if (task.isRunning) [task terminate];
         dispatch_async(dispatch_get_main_queue(), ^{ completion(snapshot, error); });
     };
+    void (^sendMessages)(NSArray<NSDictionary *> *) = ^(NSArray<NSDictionary *> *messages) {
+        NSMutableData *requestData = [NSMutableData data];
+        for (NSDictionary *message in messages) {
+            NSData *json = [NSJSONSerialization dataWithJSONObject:message options:0 error:nil];
+            if (!json) continue;
+            [requestData appendData:json];
+            [requestData appendBytes:"\n" length:1];
+        }
+        if (requestData.length > 0) [input.fileHandleForWriting writeData:requestData];
+    };
     output.fileHandleForReading.readabilityHandler = ^(NSFileHandle *handle) {
         NSData *chunk = handle.availableData;
-        if (chunk.length == 0) return;
+        if (chunk.length == 0) {
+            NSError *closed = [NSError errorWithDomain:@"TokenBar.AppServer" code:13 userInfo:@{NSLocalizedDescriptionKey: @"ChatGPT app-server 在返回额度前已退出。"}];
+            finish(nil, closed);
+            return;
+        }
         [buffer appendData:chunk];
         while (YES) {
             const uint8_t *bytes = buffer.bytes;
@@ -252,6 +318,17 @@ static NSDate *TBDateFromValue(id value) {
             NSData *line = [buffer subdataWithRange:NSMakeRange(0, newline)];
             [buffer replaceBytesInRange:NSMakeRange(0, newline + 1) withBytes:NULL length:0];
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:line options:0 error:nil];
+            if (![json isKindOfClass:NSDictionary.class]) continue;
+            if ([json[@"id"] integerValue] == 1) {
+                NSError *handshakeError = nil;
+                NSArray<NSDictionary *> *messages = [handshake messagesForResponse:json error:&handshakeError];
+                if (handshakeError) {
+                    finish(nil, handshakeError);
+                    return;
+                }
+                sendMessages(messages);
+                continue;
+            }
             if ([json[@"id"] integerValue] != 2) continue;
             NSError *parseError = nil;
             TBUsageSnapshot *snapshot = [TBCodexRateLimitParser snapshotFromResponseData:line capturedAt:NSDate.date error:&parseError];
@@ -264,14 +341,7 @@ static NSDate *TBDateFromValue(id value) {
         finish(nil, launchError);
         return;
     }
-    NSDictionary *initialize = @{@"id": @1, @"method": @"initialize", @"params": @{@"clientInfo": @{@"name": @"tokenbar", @"title": @"Token Balance", @"version": @"1.0.0"}, @"capabilities": @{@"experimentalApi": @YES}}};
-    NSDictionary *read = @{@"id": @2, @"method": @"account/rateLimits/read", @"params": NSNull.null};
-    NSMutableData *requests = [NSMutableData data];
-    for (NSDictionary *request in @[initialize, read]) {
-        [requests appendData:[NSJSONSerialization dataWithJSONObject:request options:0 error:nil]];
-        [requests appendBytes:"\n" length:1];
-    }
-    [input.fileHandleForWriting writeData:requests];
+    sendMessages(handshake.startMessages);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSError *timeout = [NSError errorWithDomain:@"TokenBar.AppServer" code:11 userInfo:@{NSLocalizedDescriptionKey: @"连接 ChatGPT 超时，请确认桌面应用已登录。"}];
         finish(nil, timeout);

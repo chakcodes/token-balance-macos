@@ -82,6 +82,7 @@ typedef NS_ENUM(NSInteger, TBWatcherAction) {
 
 @interface TBCodexAppServerProvider : NSObject <TBUsageProvider>
 @property (nonatomic, copy, readonly) NSString *providerID;
++ (NSArray<NSString *> *)candidateExecutablePaths;
 @end
 
 @interface TBFileUsageProvider : NSObject <TBUsageProvider>
